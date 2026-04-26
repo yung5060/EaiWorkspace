@@ -44,7 +44,8 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {
 	@Override
 	public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
 		return DataBufferUtils.join(exchange.getRequest().getBody())
-				.defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0])).flatMap(dataBuffer -> {
+				.defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0]))
+				.flatMap(dataBuffer -> {
 					byte[] bodyBytes = new byte[dataBuffer.readableByteCount()];
 					dataBuffer.read(bodyBytes);
 					DataBufferUtils.release(dataBuffer);

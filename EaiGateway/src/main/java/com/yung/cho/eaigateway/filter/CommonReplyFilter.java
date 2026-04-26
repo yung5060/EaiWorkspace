@@ -11,6 +11,7 @@ import org.springframework.cloud.gateway.filter.NettyWriteResponseFilter;
 import org.springframework.core.Ordered;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpResponse;
@@ -49,22 +50,27 @@ public class CommonReplyFilter implements GlobalFilter, Ordered {
                 if (!(body instanceof Flux<? extends DataBuffer> fluxBody)) {
                     return super.writeWith(body);
                 }
-                return super.writeWith(fluxBody.map(dataBuffer -> {
-                    byte[] bytes = new byte[dataBuffer.readableByteCount()];
-                    dataBuffer.read(bytes);
-                    String newResponseBody = new String(bytes, StandardCharsets.UTF_8).toLowerCase();
-//                            log.info(newResponseBody);
-                    sendLog("[RES2]", "gatewayResponse", newResponseBody);
-                    return newResponseBody;
-                }).map(text -> bufferFactory.wrap(text.getBytes(StandardCharsets.UTF_8))));
+                return DataBufferUtils.join(body)
+                        .flatMap(fullBuffer -> {
+                            byte[] bytes = new byte[fullBuffer.readableByteCount()];
+                            fullBuffer.read(bytes);
+                            DataBufferUtils.release(fullBuffer);
+
+                            String newResponseBody = new String(bytes, StandardCharsets.UTF_8).toLowerCase();
+                            sendLog("[RES2]", "gatewayResponse", newResponseBody);
+
+                            byte[] rewrittenBytes = newResponseBody.getBytes(StandardCharsets.UTF_8);
+                            return super.writeWith(
+                                    Mono.just(bufferFactory.wrap(rewrittenBytes))
+                            );
+                        });
             }
         };
 
-        return chain.filter(exchange.mutate().response(decoratedResponse).build()).onErrorResume(ex -> {
-            return sendErrorLog("[ERR0]", "gatewayError", ex)
-                    .then(writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.getMessage()))
-                    ;
-        });
+        return chain.filter(exchange.mutate().response(decoratedResponse).build()).onErrorResume(ex ->
+                sendErrorLog("[ERR0]", "gatewayError", ex)
+                        .then(writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.getMessage()))
+        );
     }
 
     private void sendLog(String phase, String requestUri, String body) {
