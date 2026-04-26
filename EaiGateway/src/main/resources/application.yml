@@ -1,0 +1,17 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: EaiGateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: default-route
+              uri: http://localhost:8080
+              predicates:
+                - Path=/**
+  config:
+    import: optional:configserver:http://localhost:8888
