@@ -2,6 +2,7 @@ package com.yung.cho.eaigateway.filter;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Map;
 
@@ -83,7 +84,7 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {
 
 	private void sendLog(String phase, String requestUri, String body) {
 		try {
-			GatewayLogEvent event = new GatewayLogEvent(Instant.now(), phase, requestUri, body);
+			GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, requestUri, body);
 			gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
 		} catch (Exception ignored) {
 			ignored.printStackTrace();

@@ -2,6 +2,7 @@ package com.yung.cho.eaigateway.filter;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneId;
 
 import org.reactivestreams.Publisher;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
@@ -29,69 +30,69 @@ import reactor.core.publisher.Mono;
 @RequiredArgsConstructor
 public class CommonReplyFilter implements GlobalFilter, Ordered {
 
-	private final GatewayLogProducer gatewayLogProducer;
-	private final ObjectMapper objectMapper;
+    private final GatewayLogProducer gatewayLogProducer;
+    private final ObjectMapper objectMapper;
 
-	@Override
-	public int getOrder() {
-		return NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1;
-	}
+    @Override
+    public int getOrder() {
+        return NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1;
+    }
 
-	@Override
-	public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-		ServerHttpResponse originalResponse = exchange.getResponse();
-		DataBufferFactory bufferFactory = originalResponse.bufferFactory();
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        ServerHttpResponse originalResponse = exchange.getResponse();
+        DataBufferFactory bufferFactory = originalResponse.bufferFactory();
 
-		ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
-			@Override
-			public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
-				if (!(body instanceof Flux<? extends DataBuffer> fluxBody)) {
-					return super.writeWith(body);
-				}
-				return super.writeWith(fluxBody.map(dataBuffer -> {
-					byte[] bytes = new byte[dataBuffer.readableByteCount()];
-					dataBuffer.read(bytes);
-					String newResponseBody = new String(bytes, StandardCharsets.UTF_8).toLowerCase();
+        ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
+            @Override
+            public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
+                if (!(body instanceof Flux<? extends DataBuffer> fluxBody)) {
+                    return super.writeWith(body);
+                }
+                return super.writeWith(fluxBody.map(dataBuffer -> {
+                    byte[] bytes = new byte[dataBuffer.readableByteCount()];
+                    dataBuffer.read(bytes);
+                    String newResponseBody = new String(bytes, StandardCharsets.UTF_8).toLowerCase();
 //                            log.info(newResponseBody);
-					sendLog("[RES2]", "gatewayResponse", newResponseBody);
-					return newResponseBody;
-				}).map(text -> bufferFactory.wrap(text.getBytes(StandardCharsets.UTF_8))));
-			}
-		};
+                    sendLog("[RES2]", "gatewayResponse", newResponseBody);
+                    return newResponseBody;
+                }).map(text -> bufferFactory.wrap(text.getBytes(StandardCharsets.UTF_8))));
+            }
+        };
 
-		return chain.filter(exchange.mutate().response(decoratedResponse).build()).onErrorResume(ex -> {
-			return sendErrorLog("[ERR0]", "gatewayError", ex)
-					.then(writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.getMessage()))
-					;
-		});
-	}
+        return chain.filter(exchange.mutate().response(decoratedResponse).build()).onErrorResume(ex -> {
+            return sendErrorLog("[ERR0]", "gatewayError", ex)
+                    .then(writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.getMessage()))
+                    ;
+        });
+    }
 
-	private void sendLog(String phase, String requestUri, String body) {
-		try {
-			GatewayLogEvent event = new GatewayLogEvent(Instant.now(), phase, requestUri, body);
-			gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
-		} catch (Exception ignored) {
-			ignored.printStackTrace();
-		}
-	}
+    private void sendLog(String phase, String requestUri, String body) {
+        try {
+            GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, requestUri, body);
+            gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
+        } catch (Exception ignored) {
+            ignored.printStackTrace();
+        }
+    }
 
-	private Mono<Void> sendErrorLog(String phase, String uri, Throwable ex) {
-		try {
-			GatewayLogEvent event = new GatewayLogEvent(Instant.now(), phase, uri, "ERROR: " + ex.getMessage());
-			gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
-		} catch (Exception ignored) {
-		}
-		return Mono.empty();
-	}
+    private Mono<Void> sendErrorLog(String phase, String uri, Throwable ex) {
+        try {
+            GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, uri, "ERROR: " + ex.getMessage());
+            gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
+        } catch (Exception ignored) {
+        }
+        return Mono.empty();
+    }
 
-	private Mono<Void> writeErrorResponse(ServerWebExchange exchange, HttpStatus status, String message) {
-		byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
-		DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(bytes);
+    private Mono<Void> writeErrorResponse(ServerWebExchange exchange, HttpStatus status, String message) {
+        byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
+        DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(bytes);
 
-		exchange.getResponse().setStatusCode(status);
-		exchange.getResponse().getHeaders().setContentType(MediaType.TEXT_PLAIN);
-		exchange.getResponse().getHeaders().setContentLength(bytes.length);
+        exchange.getResponse().setStatusCode(status);
+        exchange.getResponse().getHeaders().setContentType(MediaType.TEXT_PLAIN);
+        exchange.getResponse().getHeaders().setContentLength(bytes.length);
 
-		return exchange.getResponse().writeWith(Mono.just(buffer));
-	}
+        return exchange.getResponse().writeWith(Mono.just(buffer));
+    }
 }

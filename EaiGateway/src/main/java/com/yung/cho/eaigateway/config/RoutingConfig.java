@@ -1,5 +1,6 @@
 package com.yung.cho.eaigateway.config;
 
+import org.springframework.cloud.context.config.annotation.RefreshScope;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.ConfigurableEnvironment;
@@ -12,6 +13,7 @@ import java.util.Map;
 @Configuration
 public class RoutingConfig {
 
+    @RefreshScope
     @Bean(name = "routingMap")
     public Map<String, String> routingMap(ConfigurableEnvironment env) {
         Map<String, String> map = new LinkedHashMap<>();
