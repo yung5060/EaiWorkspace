@@ -27,6 +27,7 @@ import com.yung.cho.eaigateway.logging.GatewayLogProducer;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 @Component
 @RequiredArgsConstructor
@@ -63,7 +64,10 @@ public class CommonReplyFilter implements GlobalFilter, Ordered {       // respo
 
                             String newResponseBody = new String(bytes, StandardCharsets.UTF_8).toLowerCase();       // body rewrite
 
-                            sendLog("[RES2]", exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR).toString(), newResponseBody);     // 응답 (전문) 카프카 로깅
+                            // 응답 (전문) 카프카 로깅
+                            Mono.fromRunnable(() -> sendLog("[RES2]", exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR).toString(), newResponseBody))
+                                    .subscribeOn(Schedulers.boundedElastic())
+                                    .subscribe();
 
                             byte[] rewrittenBytes = newResponseBody.getBytes(StandardCharsets.UTF_8);       // 전문을 byte[]로 변환
                             return super.writeWith(
@@ -74,9 +78,14 @@ public class CommonReplyFilter implements GlobalFilter, Ordered {       // respo
         };
 
         return chain.filter(exchange.mutate().response(decoratedResponse).build())
-                .onErrorResume(ex ->                    // 해당 + 안쪽 필터 Exception 캐치 및 Resume(클라이언트에 에러 응답 전송)
-                        sendErrorLog("[ERR0]", "gatewayError", ex)      // 카프카 에러로그 전송
-                                .then(writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.getMessage()))    // 클라이언트에 보내줄 에러 응답 전문을 다음 filter로 전달.
+                .onErrorResume(ex -> {                    // 해당 + 안쪽 필터 Exception 캐치 및 Resume(클라이언트에 에러 응답 전송)
+                            Mono.fromRunnable(() ->
+                                            sendErrorLog("[ERR1]", exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR).toString(), ex)   // 카프카 에러로그 전송
+                                    )
+                                    .subscribeOn(Schedulers.boundedElastic())
+                                    .subscribe();
+                            return writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.getMessage());    // 클라이언트에 보내줄 에러 응답 전문을 다음 filter로 전달.
+                        }
                 );
     }
 

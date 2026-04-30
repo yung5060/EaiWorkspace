@@ -33,6 +33,7 @@ import com.yung.cho.eaigateway.logging.GatewayLogProducer;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 @Component
 @RequiredArgsConstructor
@@ -72,7 +73,11 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {        // �
                             .map(ServiceRouteConfig::uri)
                             .orElse(null);
 
-                    sendLog("[REQ1]", key + " : " + targetUri, fullBodyString);     // 요청 kafka log
+                    // Offload the potentially blocking Kafka send to boundedElastic
+                    // and use fire-and-forget so it doesn't delay the main reactor chain or block Netty I/O
+                    Mono.fromRunnable(() -> sendLog("[REQ1]", key + " : " + targetUri, fullBodyString))
+                            .subscribeOn(Schedulers.boundedElastic())
+                            .subscribe();
 
                     if (targetUri == null) {
                         return Mono.error(new IllegalArgumentException("No route for key: " + key));    // Outer 필터에서 catch 하려면 리액터 error로 반환해야함
@@ -82,7 +87,7 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {        // �
                     // 따라서 전문을 request chain에 재주입 해줘야함.
                     ServerHttpRequest decoratedRequest = new ServerHttpRequestDecorator(exchange.getRequest()) {
                         @Override
-                        public Flux<DataBuffer> getBody() {     // origina (drained) 호출 대신 override된 getBody() 호출되도록.
+                        public Flux<DataBuffer> getBody() {     // original (drained) 호출 대신 override된 getBody() 호출되도록.
                             // heap에 있는 전문을 다시 DataBuffer로 wrap
                             // defer() -> 매 전문에 따라 fresh stream(DataBuffer) 생성되도록
                             return Flux.defer(() -> Mono.just(exchange.getResponse().bufferFactory().wrap(bodyBytes)));
