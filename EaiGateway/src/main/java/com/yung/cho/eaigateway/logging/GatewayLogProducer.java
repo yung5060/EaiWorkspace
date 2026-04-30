@@ -1,4 +1,4 @@
-package com.yung.cho.eaigateway.util;
+package com.yung.cho.eaigateway.logging;
 
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;

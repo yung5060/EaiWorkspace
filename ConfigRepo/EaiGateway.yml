@@ -4,3 +4,24 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+resilience4j:
+  bulkhead:
+    configs:
+      default:
+        maxConcurrentCalls: 50         # Max concurrent requests allowed
+        maxWaitDuration: 10ms
+  circuitbreaker:
+    configs:
+      default:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 3
+        minimumNumberOfCalls: 5
+  timelimiter:
+    configs:
+      default:
+        timeoutDuration: 3s # Crucial: Drop the request if the downstream takes longer than 3s
+logging:
+  level:
+    org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory: ERROR

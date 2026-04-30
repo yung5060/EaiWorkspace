@@ -20,8 +20,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yung.cho.eaigateway.util.GatewayLogEvent;
-import com.yung.cho.eaigateway.util.GatewayLogProducer;
+import com.yung.cho.eaigateway.logging.GatewayLogEvent;
+import com.yung.cho.eaigateway.logging.GatewayLogProducer;
 
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;

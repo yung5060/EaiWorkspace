@@ -5,8 +5,16 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Optional;
 
+import com.yung.cho.eaigateway.config.ServiceRouteConfig;
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadRegistry;
+import io.github.resilience4j.reactor.bulkhead.operator.BulkheadOperator;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory;
+import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreaker;
+import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
@@ -19,11 +27,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yung.cho.eaigateway.util.GatewayLogEvent;
-import com.yung.cho.eaigateway.util.GatewayLogProducer;
+import com.yung.cho.eaigateway.logging.GatewayLogEvent;
+import com.yung.cho.eaigateway.logging.GatewayLogProducer;
 
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -31,64 +38,74 @@ import reactor.core.publisher.Mono;
 @RequiredArgsConstructor
 public class CommonRoutingFilter implements GlobalFilter, Ordered {
 
-	@Qualifier(value = "routingMap")
-	private final Map<String, String> routingMap;
-	private final GatewayLogProducer gatewayLogProducer;
-	private final ObjectMapper objectMapper;
+    @Qualifier(value = "routingMap")
+    private final Map<String, ServiceRouteConfig> routingMap;
+    private final GatewayLogProducer gatewayLogProducer;
+    private final ObjectMapper objectMapper;
+    private final ReactiveResilience4JCircuitBreakerFactory circuitBreakerFactory;
+    private final BulkheadRegistry bulkheadRegistry;
 
-	@Override
-	public int getOrder() {
-		return Ordered.LOWEST_PRECEDENCE - 1;
-	}
+    @Override
+    public int getOrder() {
+        return Ordered.LOWEST_PRECEDENCE - 1;
+    }
 
-	@Override
-	public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-		return DataBufferUtils.join(exchange.getRequest().getBody())
-				.defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0]))
-				.flatMap(dataBuffer -> {
-					byte[] bodyBytes = new byte[dataBuffer.readableByteCount()];
-					dataBuffer.read(bodyBytes);
-					DataBufferUtils.release(dataBuffer);
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        return DataBufferUtils.join(exchange.getRequest().getBody())
+                .defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0]))
+                .flatMap(dataBuffer -> {
+                    byte[] bodyBytes = new byte[dataBuffer.readableByteCount()];
+                    dataBuffer.read(bodyBytes);
+                    DataBufferUtils.release(dataBuffer);
 
-					byte[] first9 = Arrays.copyOfRange(bodyBytes, 0, Math.min(9, bodyBytes.length));
-					byte[] fullBody = Arrays.copyOfRange(bodyBytes, 0, bodyBytes.length);
+                    byte[] first9 = Arrays.copyOfRange(bodyBytes, 0, Math.min(9, bodyBytes.length));
+                    byte[] fullBody = Arrays.copyOfRange(bodyBytes, 0, bodyBytes.length);
 
-					String key = new String(first9, StandardCharsets.UTF_8);
-					String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);
+                    String key = new String(first9, StandardCharsets.UTF_8);
+                    String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);
 
-					sendLog("[REQ1]", key + " : " + resolveTargetUri(key), fullBodyString);
+                    String targetUri = Optional.ofNullable(routingMap.get(key))
+                            .map(ServiceRouteConfig::uri)
+                            .orElse(null);
 
-					String newRoute = resolveTargetUri(key);
-					if (newRoute == null) {
-						return Mono.error(new IllegalArgumentException("No route for key: " + key));
-					}
+                    sendLog("[REQ1]", key + " : " + targetUri, fullBodyString);
 
-					ServerHttpRequest decoratedRequest = new ServerHttpRequestDecorator(exchange.getRequest()) {
-						@Override
-						public Flux<DataBuffer> getBody() {
-							return Flux.defer(() -> Mono.just(exchange.getResponse().bufferFactory().wrap(bodyBytes)));
-						}
-					};
+                    if (targetUri == null) {
+                        return Mono.error(new IllegalArgumentException("No route for key: " + key));
+                    }
 
-					ServerWebExchange mutated = exchange.mutate().request(decoratedRequest).build();
+                    ServerHttpRequest decoratedRequest = new ServerHttpRequestDecorator(exchange.getRequest()) {
+                        @Override
+                        public Flux<DataBuffer> getBody() {
+                            return Flux.defer(() -> Mono.just(exchange.getResponse().bufferFactory().wrap(bodyBytes)));
+                        }
+                    };
 
-					mutated.getAttributes().put(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR,
-							java.net.URI.create(resolveTargetUri(key)));
+                    ServerWebExchange mutated = exchange.mutate().request(decoratedRequest).build();
 
-					return chain.filter(mutated);
-				});
-	}
+                    mutated.getAttributes().put(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR,
+                            java.net.URI.create(targetUri));
 
-	private String resolveTargetUri(String key) {
-		return routingMap.get(key);
-	}
+                    ReactiveCircuitBreaker cb = circuitBreakerFactory.create(key);
+                    Bulkhead bulkhead = bulkheadRegistry.bulkhead(key);
 
-	private void sendLog(String phase, String requestUri, String body) {
-		try {
-			GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, requestUri, body);
-			gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
-		} catch (Exception ignored) {
-			ignored.printStackTrace();
-		}
-	}
+                    Mono<Void> routeExecution = chain.filter(mutated)
+                            .transformDeferred(BulkheadOperator.of(bulkhead));
+
+                    return cb.run(
+                            routeExecution
+                            , Mono::error
+                    );
+                });
+    }
+
+    private void sendLog(String phase, String requestUri, String body) {
+        try {
+            GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, requestUri, body);
+            gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
+        } catch (Exception ignored) {
+            ignored.printStackTrace();
+        }
+    }
 }

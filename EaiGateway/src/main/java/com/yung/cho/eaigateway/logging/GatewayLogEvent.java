@@ -1,4 +1,4 @@
-package com.yung.cho.eaigateway.util;
+package com.yung.cho.eaigateway.logging;
 
 import java.time.ZonedDateTime;
 
