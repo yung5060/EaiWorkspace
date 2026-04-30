@@ -36,7 +36,7 @@ import reactor.core.publisher.Mono;
 
 @Component
 @RequiredArgsConstructor
-public class CommonRoutingFilter implements GlobalFilter, Ordered {
+public class CommonRoutingFilter implements GlobalFilter, Ordered {        // 라우팅 담당 GlobalFilter
 
     @Qualifier(value = "routingMap")
     private final Map<String, ServiceRouteConfig> routingMap;
@@ -47,52 +47,64 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {
 
     @Override
     public int getOrder() {
+        // 리액터 체인 가장 안쪽
+        // CommonReplyFilter ( CommonRoutingFilter () ) --> 해당 필터 에러는 바깥쪽 필터에서 Catch 가능
+        // 2147483646
         return Ordered.LOWEST_PRECEDENCE - 1;
     }
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        return DataBufferUtils.join(exchange.getRequest().getBody())
-                .defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0]))
+        return DataBufferUtils.join(exchange.getRequest().getBody())        // DataBuffer stream을 하나의 data block(full request body)로 합쳐줌
+                .defaultIfEmpty(exchange.getResponse().bufferFactory().wrap(new byte[0])) // request body 없을시에도 chain이 동작하도록
                 .flatMap(dataBuffer -> {
                     byte[] bodyBytes = new byte[dataBuffer.readableByteCount()];
-                    dataBuffer.read(bodyBytes);
-                    DataBufferUtils.release(dataBuffer);
+                    dataBuffer.read(bodyBytes);                 //*** Direct Mem에 존재하는 request body를 heap으로 복사
+                    DataBufferUtils.release(dataBuffer);        //*** 해당 Direct Memory release --> 안해주면 off heap 메모리가 서서히 참
 
-                    byte[] first9 = Arrays.copyOfRange(bodyBytes, 0, Math.min(9, bodyBytes.length));
-                    byte[] fullBody = Arrays.copyOfRange(bodyBytes, 0, bodyBytes.length);
+                    byte[] first9 = Arrays.copyOfRange(bodyBytes, 0, Math.min(9, bodyBytes.length));        // 라우팅용 9byte
+                    byte[] fullBody = Arrays.copyOfRange(bodyBytes, 0, bodyBytes.length);                   // 전체 전문 byte
 
-                    String key = new String(first9, StandardCharsets.UTF_8);
-                    String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);
+                    String key = new String(first9, StandardCharsets.UTF_8);                // 라우팅 key
+                    String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);   // 전체 전문
 
                     String targetUri = Optional.ofNullable(routingMap.get(key))
                             .map(ServiceRouteConfig::uri)
                             .orElse(null);
 
-                    sendLog("[REQ1]", key + " : " + targetUri, fullBodyString);
+                    sendLog("[REQ1]", key + " : " + targetUri, fullBodyString);     // 요청 kafka log
 
                     if (targetUri == null) {
-                        return Mono.error(new IllegalArgumentException("No route for key: " + key));
+                        return Mono.error(new IllegalArgumentException("No route for key: " + key));    // Outer 필터에서 catch 하려면 리액터 error로 반환해야함
                     }
 
+                    // request body는 chain에서 휘발성이기 때문에 한번 읽으면 다음 chain으로 전파가 안됨.
+                    // 따라서 전문을 request chain에 재주입 해줘야함.
                     ServerHttpRequest decoratedRequest = new ServerHttpRequestDecorator(exchange.getRequest()) {
                         @Override
-                        public Flux<DataBuffer> getBody() {
+                        public Flux<DataBuffer> getBody() {     // origina (drained) 호출 대신 override된 getBody() 호출되도록.
+                            // heap에 있는 전문을 다시 DataBuffer로 wrap
+                            // defer() -> 매 전문에 따라 fresh stream(DataBuffer) 생성되도록
                             return Flux.defer(() -> Mono.just(exchange.getResponse().bufferFactory().wrap(bodyBytes)));
                         }
                     };
 
+                    // 휘발된 전문 가진 original exchange를 새롭게 전문을 주입한 mutated exchange로 교체
                     ServerWebExchange mutated = exchange.mutate().request(decoratedRequest).build();
 
+                    // 라우팅 (targetUri) 설정
                     mutated.getAttributes().put(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR,
                             java.net.URI.create(targetUri));
 
+                    // 해당 라우트에 대한 서킷브레이커 + 세션매니저 get
                     ReactiveCircuitBreaker cb = circuitBreakerFactory.create(key);
                     Bulkhead bulkhead = bulkheadRegistry.bulkhead(key);
 
+                    // 리액터 체인에 세션매니저 옵션 추가
                     Mono<Void> routeExecution = chain.filter(mutated)
                             .transformDeferred(BulkheadOperator.of(bulkhead));
 
+                    // 리액터 체인을 서킷브레이커에 wrap 한 후 return
                     return cb.run(
                             routeExecution
                             , Mono::error
@@ -100,12 +112,13 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {
                 });
     }
 
+    // 카프카 요청 로그
     private void sendLog(String phase, String requestUri, String body) {
         try {
             GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, requestUri, body);
             gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
         } catch (Exception ignored) {
-            ignored.printStackTrace();
+            ignored.printStackTrace();      // 카프카 pub은 transaction에 영향이 없도록 exception 무시
         }
     }
 }

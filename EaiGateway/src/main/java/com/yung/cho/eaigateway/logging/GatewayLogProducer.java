@@ -12,6 +12,6 @@ public class GatewayLogProducer {
 	private final KafkaTemplate<String, String> kafkaTemplate;
 	
 	public void send(String topic, String message) {
-		kafkaTemplate.send(topic, message);
+		kafkaTemplate.send(topic, message);		// fire and forget...!! 비동기식 publishing
 	}
 }
