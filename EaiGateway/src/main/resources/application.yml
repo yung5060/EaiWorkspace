@@ -13,11 +13,44 @@ spring:
               uri: http://localhost:8080
               predicates:
                 - Path=/**
+    config:
+      discovery:
+        enabled: false
   config:
     import: optional:configserver:http://localhost:8888
 
 management:
+  server:
+    port: 32080
   endpoints:
     web:
       exposure:
-        include: refresh
+        include:
+          - "refresh"   # To reload your routingMap
+          - "health"    # To see CircuitBreaker status
+          - "info"      # Application metadata
+          - "metrics"   # Detailed performance data (CPU, Memory, Throughput)
+          - "prometheus" # If using Prometheus/Grafana for dashboards
+          - "gateway"   # CRITICAL: View and control gateway routes
+          - "loggers"   # Change log levels (e.g., debug routing) on the fly
+          - "bulkheadevents"
+  endpoint:
+    health:
+      show-details: always # Shows status of individual Circuit Breakers
+    gateway:
+      access: read_only
+  health:
+    ssl:
+      enabled: false
+    defaults:
+      enabled: false
+    circuitbreakers:
+      enabled: true
+    refresh:
+      enabled: true
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        registerHealthIndicator: true

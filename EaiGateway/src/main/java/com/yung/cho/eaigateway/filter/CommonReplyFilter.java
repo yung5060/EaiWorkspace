@@ -38,7 +38,7 @@ public class CommonReplyFilter implements GlobalFilter, Ordered {       // respo
     @Override
     public int getOrder() {
         // 리액터 체인 바깥쪽
-        // CommonReplyFilter ( CommonRoutingFilter () ) --> CommonReplyFilter에서 안쪽 필터 에러 Catch 가능
+        // CommonReplyFilter ( CommonRoutingFilter () ) --> 여기서 안쪽 필터 에러 Catch 가능
         // -2
         return NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1;
     }
