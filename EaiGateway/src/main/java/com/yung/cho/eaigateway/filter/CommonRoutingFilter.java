@@ -1,20 +1,17 @@
 package com.yung.cho.eaigateway.filter;
 
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Optional;
-
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yung.cho.eaigateway.config.ServiceRouteConfig;
+import com.yung.cho.eaigateway.logging.GatewayLogEvent;
+import com.yung.cho.eaigateway.logging.GatewayLogProducer;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import io.github.resilience4j.reactor.bulkhead.operator.BulkheadOperator;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreaker;
-import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
@@ -25,19 +22,24 @@ import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yung.cho.eaigateway.logging.GatewayLogEvent;
-import com.yung.cho.eaigateway.logging.GatewayLogProducer;
-
-import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.Map;
+import java.util.Optional;
+
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class CommonRoutingFilter implements GlobalFilter, Ordered {        // 라우팅 담당 GlobalFilter
+
+    // Cache the ZoneId to prevent thousands of unnecessary lookups per second
+    private static final ZoneId SEOUL_ZONE = ZoneId.of("Asia/Seoul");
 
     @Qualifier(value = "routingMap")
     private final Map<String, ServiceRouteConfig> routingMap;
@@ -45,6 +47,7 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {        // �
     private final ObjectMapper objectMapper;
     private final ReactiveResilience4JCircuitBreakerFactory circuitBreakerFactory;
     private final BulkheadRegistry bulkheadRegistry;
+    private final Scheduler kafkaLogScheduler = Schedulers.newBoundedElastic(50, 10000, "kafka-request-log-thread");
 
     @Override
     public int getOrder() {
@@ -63,21 +66,21 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {        // �
                     dataBuffer.read(bodyBytes);                 //*** Direct Mem에 존재하는 request body를 heap으로 복사
                     DataBufferUtils.release(dataBuffer);        //*** 해당 Direct Memory release --> 안해주면 off heap 메모리가 서서히 참
 
-                    byte[] first9 = Arrays.copyOfRange(bodyBytes, 0, Math.min(9, bodyBytes.length));        // 라우팅용 9byte
-                    byte[] fullBody = Arrays.copyOfRange(bodyBytes, 0, bodyBytes.length);                   // 전체 전문 byte
-
-                    String key = new String(first9, StandardCharsets.UTF_8);                // 라우팅 key
-                    String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);   // 전체 전문
+                    String key = new String(bodyBytes, 0, Math.min(9, bodyBytes.length), StandardCharsets.UTF_8);  // 라우팅 key
+//                    String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);   // 전체 전문
 
                     String targetUri = Optional.ofNullable(routingMap.get(key))
                             .map(ServiceRouteConfig::uri)
                             .orElse(null);
 
-                    // Offload the potentially blocking Kafka send to boundedElastic
-                    // and use fire-and-forget so it doesn't delay the main reactor chain or block Netty I/O
-                    Mono.fromRunnable(() -> sendLog("[REQ1]", key + " : " + targetUri, fullBodyString))
-                            .subscribeOn(Schedulers.boundedElastic())
-                            .subscribe();
+                    try {
+                        // 별도의 kafkaLogScheduler 쓰레드로 카프카 pub
+                        Mono.fromRunnable(() -> sendLog("[REQ1]", key + " : " + targetUri, bodyBytes))
+                                .subscribeOn(kafkaLogScheduler)
+                                .subscribe(null, e -> log.warn("Failed to process Kafka log asynchronously: {}", e.getMessage()));
+                    } catch (Exception e) {
+                        log.warn("Kafka logging queue is full. Dropping log to protect gateway.");
+                    }
 
                     if (targetUri == null) {
                         return Mono.error(new IllegalArgumentException("No route for key: " + key));    // Outer 필터에서 catch 하려면 리액터 error로 반환해야함
@@ -118,12 +121,13 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {        // �
     }
 
     // 카프카 요청 로그
-    private void sendLog(String phase, String requestUri, String body) {
+    private void sendLog(String phase, String requestUri, byte[] body) {
         try {
-            GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(ZoneId.of("Asia/Seoul")), phase, requestUri, body);
-            gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsString(event));
+            // Pass byte[] directly. GatewayLogEvent requires a signature update.
+            GatewayLogEvent event = new GatewayLogEvent(Instant.now().atZone(SEOUL_ZONE), phase, requestUri, body);
+            gatewayLogProducer.send("gateway-logs", objectMapper.writeValueAsBytes(event));
         } catch (Exception ignored) {
-            ignored.printStackTrace();      // 카프카 pub은 transaction에 영향이 없도록 exception 무시
+            log.error("Failed to send Kafka Log", ignored);     // 카프카 pub은 transaction에 영향이 없도록 exception 무시
         }
     }
 }

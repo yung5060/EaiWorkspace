@@ -5,7 +5,7 @@ spring:
       properties:
         max.block.ms: 2000
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
 resilience4j:
   bulkhead:
     configs:
