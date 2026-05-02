@@ -68,9 +68,9 @@ public class CommonReplyFilter implements GlobalFilter, Ordered {       // respo
                             int originalSize = fullBuffer.readableByteCount();
                             byte[] rewrittenBytes = new byte[originalSize];
                             fullBuffer.read(rewrittenBytes);                                  // Direct Mem 내용을 heap으로 복사
-                            if (originalSize > 0) {
-                                rewrittenBytes[0] = (byte) '_';                               // 첫 번째 문자를 '_' (ASCII 95) 로 변경
-                            }
+//                            if (originalSize > 0) {
+//                                rewrittenBytes[0] = (byte) '_';                               // 첫 번째 문자를 '_' (ASCII 95) 로 변경
+//                            }
                             DataBufferUtils.release(fullBuffer);    //*** 해당 Direct Memory release --> 안해주면 off heap 메모리가 서서히 참
 
                             // 응답 (전문) 카프카 로깅

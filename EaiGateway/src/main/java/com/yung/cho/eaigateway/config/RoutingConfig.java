@@ -53,8 +53,9 @@ public class RoutingConfig {
         map.forEach((key, config) -> {
             CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()       // 서킷브레이커 옵션 (재)조정
                     .failureRateThreshold(config.failureRateThreshold())
-                    .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
-                    .slidingWindowSize(10)
+                    .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.TIME_BASED)
+                    .slidingWindowSize(60)
+                    .minimumNumberOfCalls(10)
                     .waitDurationInOpenState(Duration.ofSeconds(10))
                     .build();
             TimeLimiterConfig tlConfig = TimeLimiterConfig.custom()             // 타임아웃 옵션 (재)조정

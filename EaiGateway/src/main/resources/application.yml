@@ -5,6 +5,8 @@ spring:
   application:
     name: EaiGateway
   cloud:
+    discovery:
+      enabled: false
     gateway:
       server:
         webflux:
@@ -13,9 +15,6 @@ spring:
               uri: http://localhost:8080
               predicates:
                 - Path=/**
-    config:
-      discovery:
-        enabled: false
   config:
     import: optional:configserver:http://localhost:8888
 

@@ -1,6 +1,7 @@
 package com.yung.cho.eaigateway.filter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.yung.cho.eaigateway.config.ServiceRouteConfig;
 import com.yung.cho.eaigateway.logging.GatewayLogEvent;
 import com.yung.cho.eaigateway.logging.GatewayLogProducer;
@@ -20,8 +21,10 @@ import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
@@ -65,17 +68,62 @@ public class CommonRoutingFilter implements GlobalFilter, Ordered {        // �
                     byte[] bodyBytes = new byte[dataBuffer.readableByteCount()];
                     dataBuffer.read(bodyBytes);                 //*** Direct Mem에 존재하는 request body를 heap으로 복사
                     DataBufferUtils.release(dataBuffer);        //*** 해당 Direct Memory release --> 안해주면 off heap 메모리가 서서히 참
+                    
+                    String key;
+                    String requestPath = exchange.getRequest().getURI().getPath();
+                    boolean isRestPath = requestPath.startsWith("/REST/") || requestPath.equals("/REST");
 
-                    String key = new String(bodyBytes, 0, Math.min(9, bodyBytes.length), StandardCharsets.UTF_8);  // 라우팅 key
+                    if (isRestPath) {
+                        // REST 경로인 경우 Body 검사를 바이패스하고 헤더에서 라우팅 키를 추출
+                        key = exchange.getRequest().getHeaders().getFirst("key");
+                        if (key == null) key = "";
+                    } else {
+                        MediaType contentType = exchange.getRequest().getHeaders().getContentType();
+
+                        // Content-Type이 JSON인 경우 지정된 HTTP Body Json에서 라우팅 키를 추출
+                        if (contentType != null && contentType.includes(MediaType.APPLICATION_JSON)) {
+                            try {
+                                JsonNode rootNode = objectMapper.readTree(bodyBytes);
+                                JsonNode keyNode = rootNode.path("header_part").path("key");
+                                
+                                if (!keyNode.isMissingNode() && !keyNode.isNull()) {
+                                    key = keyNode.asText();
+                                } else {
+                                    key = ""; // 구조가 다르거나 key가 없을 때의 기본값
+                                }
+                            } catch (Exception e) {
+                                log.warn("Failed to parse routing key from JSON body", e);
+                                key = "";
+                            }
+                        } else {
+                            // 그 외의 경우 기존처럼 body의 앞 9바이트에서 추출
+                            key = new String(bodyBytes, 0, Math.min(9, bodyBytes.length), StandardCharsets.UTF_8);  // 라우팅 key
+                        }
+                    }
+
 //                    String fullBodyString = new String(fullBody, StandardCharsets.UTF_8);   // 전체 전문
 
                     String targetUri = Optional.ofNullable(routingMap.get(key))
                             .map(ServiceRouteConfig::uri)
                             .orElse(null);
 
+                    if (targetUri != null && isRestPath) {
+                        // "/REST" 부분을 제외한 나머지 경로 추출
+                        String suffix = requestPath.length() > 5 ? requestPath.substring(5) : "";
+                        
+                        // 기존 목적지 URI에 동적으로 Path와 Query String을 붙여줌
+                        targetUri = UriComponentsBuilder.fromUriString(targetUri)
+                                .path(suffix)
+                                .query(exchange.getRequest().getURI().getRawQuery())
+                                .build(true)
+                                .toUriString();
+                    }
+
                     try {
                         // 별도의 kafkaLogScheduler 쓰레드로 카프카 pub
-                        Mono.fromRunnable(() -> sendLog("[REQ1]", key + " : " + targetUri, bodyBytes))
+                        String finalKey = key;
+                        String finalTargetUri = targetUri;
+                        Mono.fromRunnable(() -> sendLog("[REQ1]", finalKey + " : " + finalTargetUri, bodyBytes))
                                 .subscribeOn(kafkaLogScheduler)
                                 .subscribe(null, e -> log.warn("Failed to process Kafka log asynchronously: {}", e.getMessage()));
                     } catch (Exception e) {
