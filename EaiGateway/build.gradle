@@ -5,13 +5,17 @@ plugins {
 }
 
 group = 'com.yung.cho'
-version = '0.0.1-SNAPSHOT'
+version = ''
 description = 'EaiGateway'
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+        languageVersion = JavaLanguageVersion.of(21)
     }
+}
+
+tasks.named('bootJar') {
+    archiveFileName = 'EaiGateway.jar'
 }
 
 repositories {
