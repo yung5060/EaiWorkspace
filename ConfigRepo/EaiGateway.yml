@@ -1,6 +1,7 @@
 spring:
   kafka:
-    bootstrap-servers: localhost.kafka.com:9092
+#    bootstrap-servers: localhost.kafka.com:9092
+    bootstrap-servers: yungcho-gram:9094
     producer:
       properties:
         max.block.ms: 2000
