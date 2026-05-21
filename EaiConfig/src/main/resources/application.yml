@@ -11,3 +11,12 @@ spring:
       server:
         native:
           search-locations: file:///C:/__dev__/code/EaiWorkspace/ConfigRepo
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: prometheus
+  endpoint:
+    health:
+      show-details: always
