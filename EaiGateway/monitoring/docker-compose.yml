@@ -17,6 +17,12 @@ services:
       - "9090:9090"
     networks:
       - home-server_default
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
     restart: unless-stopped
 
   grafana:
@@ -31,6 +37,12 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     networks:
       - home-server_default
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
     restart: unless-stopped
     depends_on:
       - prometheus
