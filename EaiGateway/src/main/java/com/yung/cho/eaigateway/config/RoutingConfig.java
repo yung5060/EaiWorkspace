@@ -14,8 +14,8 @@ import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
 
 import java.time.Duration;
-import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Configuration
 public class RoutingConfig {
@@ -29,7 +29,7 @@ public class RoutingConfig {
             , CircuitBreakerRegistry circuitBreakerRegistry
             , TimeLimiterRegistry timeLimiterRegistry
     ) {
-        Map<String, ServiceRouteConfig> map = new LinkedHashMap<>();
+        Map<String, ServiceRouteConfig> map = new ConcurrentHashMap<>();
         // 모든 라우팅 정보를 프로퍼티에서 Map으로 캐싱하는 loop
         for (PropertySource<?> ps : env.getPropertySources()) {
             if (ps.getName().contains("routeInfo") && ps instanceof EnumerablePropertySource<?> eps) {      // -routeInfo 컨피그만 읽도록
