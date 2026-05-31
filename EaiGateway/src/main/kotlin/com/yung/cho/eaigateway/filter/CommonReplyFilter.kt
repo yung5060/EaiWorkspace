@@ -94,7 +94,6 @@ class CommonReplyFilter(
         try {
             chain.filter(mutatedExchange).awaitSingleOrNull()
         } catch (ex: Exception) {
-
             // Fire-and-forget Kafka Error Logging
             logScope.launch {
                 try {
@@ -105,10 +104,8 @@ class CommonReplyFilter(
                     log.warn("Kafka logging queue is full. Dropping error log to protect gateway. Error: ${e.message}")
                 }
             }
-
             // Suspend and write the custom error response
             writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.message ?: "Unknown error")
-
             null
         }
     }

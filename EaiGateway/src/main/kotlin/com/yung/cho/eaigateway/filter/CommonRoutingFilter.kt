@@ -5,7 +5,9 @@ import com.yung.cho.eaigateway.config.ServiceRouteConfig
 import com.yung.cho.eaigateway.logging.GatewayLogEvent
 import com.yung.cho.eaigateway.logging.GatewayLogProducer
 import io.github.resilience4j.bulkhead.BulkheadRegistry
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
 import io.github.resilience4j.reactor.bulkhead.operator.BulkheadOperator
+import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -14,7 +16,6 @@ import kotlinx.coroutines.reactor.awaitSingleOrNull
 import kotlinx.coroutines.reactor.mono
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
-import org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
 import org.springframework.cloud.gateway.support.ServerWebExchangeUtils
@@ -40,7 +41,7 @@ class CommonRoutingFilter(
     private val routingMap: Map<String, ServiceRouteConfig>,
     private val gatewayLogProducer: GatewayLogProducer,
     private val objectMapper: ObjectMapper,
-    private val circuitBreakerFactory: ReactiveResilience4JCircuitBreakerFactory,
+    private val circuitbreakerRegistry: CircuitBreakerRegistry,
     private val bulkheadRegistry: BulkheadRegistry
 ) : GlobalFilter, Ordered {
 
@@ -50,7 +51,8 @@ class CommonRoutingFilter(
     }
 
     // Convert the Reactor Scheduler directly into a Coroutine Dispatcher
-    private val kafkaDispatcher = Schedulers.newBoundedElastic(50, 10000, "kafka-request-log-thread").asCoroutineDispatcher()
+    private val kafkaDispatcher =
+        Schedulers.newBoundedElastic(50, 10000, "kafka-request-log-thread").asCoroutineDispatcher()
 
     // Create a dedicated scope for fire-and-forget background tasks
     private val logScope = CoroutineScope(SupervisorJob() + kafkaDispatcher)
@@ -133,13 +135,13 @@ class CommonRoutingFilter(
         mutated.attributes[ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR] = URI.create(targetUri)
 
         // 6. Apply Resilience4j and await the final chain execution
-        val cb = circuitBreakerFactory.create(key)
+        val cb = circuitbreakerRegistry.circuitBreaker(key)
         val bulkhead = bulkheadRegistry.bulkhead(key)
 
-        val routeExecution = chain.filter(mutated)
-            .transformDeferred(BulkheadOperator.of(bulkhead))
-
         // Return the final suspended result
-        cb.run(routeExecution) { Mono.error(it) }.awaitSingleOrNull()
+        chain.filter(mutated)
+            .transformDeferred(CircuitBreakerOperator.of(cb))
+            .transformDeferred(BulkheadOperator.of(bulkhead))
+            .awaitSingleOrNull()
     }
 }
