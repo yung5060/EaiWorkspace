@@ -6,6 +6,12 @@ import com.yung.cho.eaigateway.logging.GatewayLogEvent
 import com.yung.cho.eaigateway.logging.GatewayLogProducer
 import io.github.resilience4j.bulkhead.BulkheadRegistry
 import io.github.resilience4j.reactor.bulkhead.operator.BulkheadOperator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.reactor.asCoroutineDispatcher
+import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.reactor.mono
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory
@@ -43,87 +49,13 @@ class CommonRoutingFilter(
         private val SEOUL_ZONE = ZoneId.of("Asia/Seoul")
     }
 
-    private val kafkaLogScheduler = Schedulers.newBoundedElastic(50, 10000, "kafka-request-log-thread")
+    // Convert the Reactor Scheduler directly into a Coroutine Dispatcher
+    private val kafkaDispatcher = Schedulers.newBoundedElastic(50, 10000, "kafka-request-log-thread").asCoroutineDispatcher()
 
-    override fun getOrder(): Int {
-        // Ordered.LOWEST_PRECEDENCE - 1
-        return Int.MAX_VALUE - 1
-    }
+    // Create a dedicated scope for fire-and-forget background tasks
+    private val logScope = CoroutineScope(SupervisorJob() + kafkaDispatcher)
 
-    override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
-        return DataBufferUtils.join(exchange.request.body)
-            .defaultIfEmpty(exchange.response.bufferFactory().wrap(ByteArray(0)))
-            .flatMap { dataBuffer ->
-                val bodyBytes = ByteArray(dataBuffer.readableByteCount())
-                dataBuffer.read(bodyBytes)
-                DataBufferUtils.release(dataBuffer)
-
-                val requestPath = exchange.request.uri.path
-                val isRestPath = requestPath.startsWith("/REST/") || requestPath == "/REST"
-
-                val key = if (isRestPath) {
-                    exchange.request.headers.getFirst("key")?.replace("[\r\n]".toRegex(), "") ?: ""
-                } else {
-                    val contentType = exchange.request.headers.contentType
-                    if (contentType != null && contentType.includes(MediaType.APPLICATION_JSON)) {
-                        if (bodyBytes.isNotEmpty()) {
-                            try {
-                                val rootNode = objectMapper.readTree(bodyBytes)
-                                val keyNode = rootNode.path("header_part").path("key")
-                                if (!keyNode.isMissingNode && !keyNode.isNull) {
-                                    keyNode.asText()
-                                } else ""
-                            } catch (e: Exception) {
-                                log.warn("Failed to parse routing key from JSON body", e)
-                                ""
-                            }
-                        } else ""
-                    } else {
-                        String(bodyBytes, 0, minOf(9, bodyBytes.size), StandardCharsets.UTF_8)
-                    }
-                }
-
-                var targetUri = routingMap[key]?.uri
-
-                if (targetUri != null && isRestPath) {
-                    val suffix = if (requestPath.length > 5) requestPath.substring(5) else ""
-                    targetUri = UriComponentsBuilder.fromUriString(targetUri)
-                        .path(suffix)
-                        .query(exchange.request.uri.rawQuery)
-                        .build(true)
-                        .toUriString()
-                }
-
-                try {
-                    Mono.fromRunnable<Void> { sendLog("[REQ1]", "$key : $targetUri", bodyBytes) }
-                        .subscribeOn(kafkaLogScheduler)
-                        .subscribe(null, { e -> log.warn("Failed to process Kafka log asynchronously: {}", e.message) })
-                } catch (e: Exception) {
-                    log.warn("Kafka logging queue is full. Dropping log to protect gateway.")
-                }
-
-                if (targetUri == null) {
-                    return@flatMap Mono.error(IllegalArgumentException("No route for key: $key"))
-                }
-
-                val decoratedRequest = object : ServerHttpRequestDecorator(exchange.request) {
-                    override fun getBody(): Flux<DataBuffer> {
-                        return Flux.defer { Mono.just(exchange.response.bufferFactory().wrap(bodyBytes)) }
-                    }
-                }
-
-                val mutated = exchange.mutate().request(decoratedRequest).build()
-                mutated.attributes[ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR] = URI.create(targetUri)
-
-                val cb = circuitBreakerFactory.create(key)
-                val bulkhead = bulkheadRegistry.bulkhead(key)
-
-                val routeExecution = chain.filter(mutated)
-                    .transformDeferred(BulkheadOperator.of(bulkhead))
-
-                cb.run(routeExecution) { Mono.error(it) }
-            }
-    }
+    override fun getOrder(): Int = Int.MAX_VALUE - 1
 
     private fun sendLog(phase: String, requestUri: String, body: ByteArray) {
         try {
@@ -132,5 +64,82 @@ class CommonRoutingFilter(
         } catch (ignored: Exception) {
             log.error("Failed to send Kafka Log", ignored)
         }
+    }
+
+    override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> = mono {
+
+        // 1. Await the body buffer non-blockingly, avoiding flatMap
+        val dataBuffer = DataBufferUtils.join(exchange.request.body).awaitSingleOrNull()
+
+        val bodyBytes = if (dataBuffer != null) {
+            val bytes = ByteArray(dataBuffer.readableByteCount())
+            dataBuffer.read(bytes)
+            DataBufferUtils.release(dataBuffer)
+            bytes
+        } else {
+            ByteArray(0)
+        }
+
+        // 2. Extract key
+        val requestPath = exchange.request.uri.path
+        val isRestPath = requestPath.startsWith("/REST/") || requestPath == "/REST"
+
+        val key = if (isRestPath) {
+            exchange.request.headers.getFirst("key")?.replace("[\r\n]".toRegex(), "") ?: ""
+        } else {
+            val contentType = exchange.request.headers.contentType
+            if (contentType != null && contentType.includes(MediaType.APPLICATION_JSON) && bodyBytes.isNotEmpty()) {
+                try {
+                    val rootNode = objectMapper.readTree(bodyBytes)
+                    val keyNode = rootNode.path("header_part").path("key")
+                    if (!keyNode.isMissingNode && !keyNode.isNull) keyNode.asText() else ""
+                } catch (e: Exception) {
+                    log.warn("Failed to parse routing key from JSON body", e)
+                    ""
+                }
+            } else {
+                String(bodyBytes, 0, minOf(9, bodyBytes.size), StandardCharsets.UTF_8)
+            }
+        }
+
+        // 3. Resolve Target URI
+        var targetUri = routingMap[key]?.uri ?: throw IllegalArgumentException("No route for key: $key")
+
+        if (isRestPath) {
+            val suffix = if (requestPath.length > 5) requestPath.substring(5) else ""
+            targetUri = UriComponentsBuilder.fromUriString(targetUri)
+                .path(suffix)
+                .query(exchange.request.uri.rawQuery)
+                .build(true)
+                .toUriString()
+        }
+
+        // 4. Fire-and-forget Kafka Logging using Coroutine launch
+        logScope.launch {
+            try {
+                sendLog("[REQ1]", "$key : $targetUri", bodyBytes)
+            } catch (e: Exception) {
+                log.warn("Kafka logging queue is full. Dropping log to protect gateway. Error: ${e.message}")
+            }
+        }
+
+        // 5. Decorate Request and Mutate Exchange
+        val decoratedRequest = object : ServerHttpRequestDecorator(exchange.request) {
+            override fun getBody(): Flux<DataBuffer> =
+                Flux.defer { Mono.just(exchange.response.bufferFactory().wrap(bodyBytes)) }
+        }
+
+        val mutated = exchange.mutate().request(decoratedRequest).build()
+        mutated.attributes[ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR] = URI.create(targetUri)
+
+        // 6. Apply Resilience4j and await the final chain execution
+        val cb = circuitBreakerFactory.create(key)
+        val bulkhead = bulkheadRegistry.bulkhead(key)
+
+        val routeExecution = chain.filter(mutated)
+            .transformDeferred(BulkheadOperator.of(bulkhead))
+
+        // Return the final suspended result
+        cb.run(routeExecution) { Mono.error(it) }.awaitSingleOrNull()
     }
 }

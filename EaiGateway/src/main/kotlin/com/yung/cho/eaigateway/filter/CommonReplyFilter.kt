@@ -3,6 +3,12 @@ package com.yung.cho.eaigateway.filter
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.yung.cho.eaigateway.logging.GatewayLogEvent
 import com.yung.cho.eaigateway.logging.GatewayLogProducer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.reactor.asCoroutineDispatcher
+import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.reactor.mono
 import org.reactivestreams.Publisher
 import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
@@ -35,60 +41,76 @@ class CommonReplyFilter(
         private val SEOUL_ZONE = ZoneId.of("Asia/Seoul")
     }
 
-    private val kafkaLogScheduler = Schedulers.newBoundedElastic(50, 10000, "kafka-response-log-thread")
+    // Convert Scheduler to Coroutine Dispatcher for background logging
+    private val kafkaDispatcher =
+        Schedulers.newBoundedElastic(50, 10000, "kafka-response-log-thread").asCoroutineDispatcher()
+    private val logScope = CoroutineScope(SupervisorJob() + kafkaDispatcher)
 
-    override fun getOrder(): Int {
-        // NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1
-        return NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1
-    }
+    override fun getOrder(): Int = NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1
 
-    override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
+    override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> = mono {
         val originalResponse = exchange.response
         val bufferFactory = originalResponse.bufferFactory()
 
+        // 1. Decorate the response using a nested mono { } builder for the writeWith method
         val decoratedResponse = object : ServerHttpResponseDecorator(originalResponse) {
-            override fun writeWith(body: Publisher<out DataBuffer>): Mono<Void> {
+            override fun writeWith(body: Publisher<out DataBuffer>): Mono<Void> = mono {
                 if (body !is Flux<*>) {
-                    return super.writeWith(body)
+                    super.writeWith(body).awaitSingleOrNull()
                 }
-                
-                return DataBufferUtils.join(body)
-                    .flatMap { fullBuffer ->
-                        val originalSize = fullBuffer.readableByteCount()
-                        val rewrittenBytes = ByteArray(originalSize)
-                        fullBuffer.read(rewrittenBytes)
-                        DataBufferUtils.release(fullBuffer)
 
+                // Suspend and wait for the entire body to be joined
+                val fullBuffer = DataBufferUtils.join(body).awaitSingleOrNull()
+
+                if (fullBuffer != null) {
+                    val originalSize = fullBuffer.readableByteCount()
+                    val rewrittenBytes = ByteArray(originalSize)
+                    fullBuffer.read(rewrittenBytes)
+                    DataBufferUtils.release(fullBuffer)
+
+                    // Fire-and-forget Kafka Logging
+                    logScope.launch {
                         try {
-                            Mono.fromRunnable<Void> {
-                                val url = exchange.getAttribute<Any>(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR)?.toString() ?: "unknown"
-                                sendLog("[RES2]", url, rewrittenBytes)
-                            }
-                            .subscribeOn(kafkaLogScheduler)
-                            .subscribe(null, { e -> log.warn("Failed to process Kafka log asynchronously: {}", e.message) })
+                            val url =
+                                exchange.getAttribute<Any>(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR)?.toString()
+                                    ?: "unknown"
+                            sendLog("[RES2]", url, rewrittenBytes)
                         } catch (e: Exception) {
-                            log.warn("Kafka logging queue is full. Dropping log to protect gateway.")
+                            log.warn("Kafka logging queue is full. Dropping log to protect gateway. Error: ${e.message}")
                         }
-
-                        super.writeWith(Mono.just(bufferFactory.wrap(rewrittenBytes)))
                     }
+
+                    // Write the buffered body back to the client
+                    super.writeWith(Mono.just(bufferFactory.wrap(rewrittenBytes))).awaitSingleOrNull()
+                } else {
+                    super.writeWith(Mono.empty()).awaitSingleOrNull()
+                }
             }
         }
 
-        return chain.filter(exchange.mutate().response(decoratedResponse).build())
-            .onErrorResume { ex ->
+        val mutatedExchange = exchange.mutate().response(decoratedResponse).build()
+
+        // 2. The entire downstream filter chain is wrapped in a standard try/catch
+        try {
+            chain.filter(mutatedExchange).awaitSingleOrNull()
+        } catch (ex: Exception) {
+
+            // Fire-and-forget Kafka Error Logging
+            logScope.launch {
                 try {
-                    Mono.fromRunnable<Void> {
-                        val url = exchange.getAttribute<Any>(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR)?.toString() ?: "unknown"
-                        sendErrorLog("[ERR1]", url, ex)
-                    }
-                    .subscribeOn(kafkaLogScheduler)
-                    .subscribe(null, { e -> log.warn("Failed to process Kafka error log asynchronously: {}", e.message) })
+                    val url = exchange.getAttribute<Any>(ServerWebExchangeUtils.GATEWAY_REQUEST_URL_ATTR)?.toString()
+                        ?: "unknown"
+                    sendErrorLog("[ERR1]", url, ex)
                 } catch (e: Exception) {
-                    log.warn("Kafka logging queue is full. Dropping error log to protect gateway.")
+                    log.warn("Kafka logging queue is full. Dropping error log to protect gateway. Error: ${e.message}")
                 }
-                writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.message ?: "Unknown error")
             }
+
+            // Suspend and write the custom error response
+            writeErrorResponse(exchange, HttpStatus.BAD_GATEWAY, ex.message ?: "Unknown error")
+
+            null
+        }
     }
 
     private fun sendLog(phase: String, requestUri: String, bodyBytes: ByteArray) {
@@ -114,7 +136,8 @@ class CommonReplyFilter(
         }
     }
 
-    private fun writeErrorResponse(exchange: ServerWebExchange, status: HttpStatus, message: String): Mono<Void> {
+    // Convert the error writer into a suspend function
+    private suspend fun writeErrorResponse(exchange: ServerWebExchange, status: HttpStatus, message: String) {
         val bytes = message.toByteArray(StandardCharsets.UTF_8)
         val buffer = exchange.response.bufferFactory().wrap(bytes)
 
@@ -122,6 +145,7 @@ class CommonReplyFilter(
         exchange.response.headers.contentType = MediaType.TEXT_PLAIN
         exchange.response.headers.contentLength = bytes.size.toLong()
 
-        return exchange.response.writeWith(Mono.just(buffer))
+        // Bridge the Reactor write operation into the coroutine
+        exchange.response.writeWith(Mono.just(buffer)).awaitSingleOrNull()
     }
 }

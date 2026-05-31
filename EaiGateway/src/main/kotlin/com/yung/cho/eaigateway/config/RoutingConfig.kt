@@ -35,7 +35,7 @@ class RoutingConfig {
                     val rawValue = ps.getProperty(name) ?: continue
                     val parts = rawValue.toString().split(",")
 
-                    val uri = parts[0].trim()
+                    val uri = parts.getOrNull(0)?.trim().toString()
                     val timeout = parts.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }?.toLong() ?: 70000L
                     val failureRate = parts.getOrNull(2)?.trim()?.takeIf { it.isNotBlank() }?.toFloat() ?: 50.0f
                     val concurrentSessions = parts.getOrNull(3)?.trim()?.takeIf { it.isNotBlank() }?.toInt() ?: 50
@@ -60,28 +60,21 @@ class RoutingConfig {
                 .timeoutDuration(Duration.ofMillis(config.timeoutMs))
                 .build()
 
+            val bulkheadConfig = BulkheadConfig.custom()            // 세션제어 옵션 조정
+                .maxConcurrentCalls(config.concurrentSessions)
+                .maxWaitDuration(Duration.ofMillis(10))
+                .build()
+
             // 기존 서킷브레이커 + 타임아웃 옵션 제거
             circuitBreakerRegistry.remove(key)
             timeLimiterRegistry.remove(key)
+            bulkheadRegistry.remove(key)
             
             // 신규 서킷브레이커 + 옵션 적용
             circuitBreakerRegistry.circuitBreaker(key, cbConfig)
             timeLimiterRegistry.timeLimiter(key, tlConfig)
-
-            // 세션제어 옵션 조정 및 런타임 배포
-            val newBulkheadConfig = BulkheadConfig.custom()
-                .maxConcurrentCalls(config.concurrentSessions)
-                .maxWaitDuration(Duration.ofMillis(10))
-                .build()
-                
-            val existingBulkhead = bulkheadRegistry.find(key)
-            if (existingBulkhead.isPresent) {
-                existingBulkhead.get().changeConfig(newBulkheadConfig)        // 세션제어 옵션 재조정(변경)
-            } else {
-                bulkheadRegistry.bulkhead(key, newBulkheadConfig)             // 기존 옵션 없을시 새로 조정
-            }
+            bulkheadRegistry.bulkhead(key, bulkheadConfig)
         }
-
         return map
     }
 }

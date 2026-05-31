@@ -3,7 +3,6 @@ package com.yung.cho.eaigateway.filter
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import com.yung.cho.eaigateway.config.ServiceRouteConfig
 import com.yung.cho.eaigateway.logging.GatewayLogProducer
 import io.github.resilience4j.bulkhead.Bulkhead
 import io.github.resilience4j.bulkhead.BulkheadConfig
