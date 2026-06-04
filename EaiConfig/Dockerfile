@@ -8,7 +8,7 @@ WORKDIR /app
 COPY . .
 
 # Compile the application, skipping tests for speed
-RUN gradle clean build -x test
+RUN gradle clean bootJar
 
 # ==========================================
 # Stage 2: Run the Config Server
