@@ -32,6 +32,7 @@ import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 
@@ -57,7 +58,8 @@ class CommonRoutingFilter(
     // Create a dedicated scope for fire-and-forget background tasks
     private val logScope = CoroutineScope(SupervisorJob() + kafkaDispatcher)
 
-    override fun getOrder(): Int = Int.MAX_VALUE - 1
+//    override fun getOrder(): Int = Int.MAX_VALUE - 1
+    override fun getOrder(): Int = Ordered.LOWEST_PRECEDENCE - 1
 
     private fun sendLog(phase: String, requestUri: String, body: ByteArray) {
         try {
@@ -140,6 +142,7 @@ class CommonRoutingFilter(
 
         // Return the final suspended result
         chain.filter(mutated)
+            .timeout(Duration.ofMillis(70000))
             .transformDeferred(CircuitBreakerOperator.of(cb))
             .transformDeferred(BulkheadOperator.of(bulkhead))
             .awaitSingleOrNull()
